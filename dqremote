@@ -1,0 +1,138 @@
+#!/bin/python3
+
+import lirc
+import cec
+import subprocess
+import time
+import sys
+
+
+def initcec():
+    cecconfig = cec.libcec_configuration()
+    cecconfig.strDeviceName = "dqpi"
+    cecconfig.bActivateSource = 0
+    cecconfig.deviceTypes.Add(cec.CEC_DEVICE_TYPE_RECORDING_DEVICE)
+    cecconfig.clientVersion = cec.LIBCEC_VERSION_CURRENT
+    lib = cec.ICECAdapter.Create(cecconfig)
+
+    adapters = lib.DetectAdapters()
+    adapter = None
+    for a in adapters:
+        if a.strComName in {'RPI'}:
+            continue
+        adapter = a
+        break
+    if not adapter:
+        raise Exception("Failed to find any adapters")
+    if not lib.Open(adapter.strComName):
+        raise Exception("Failed to open adapter")
+
+    return lib
+
+
+def initlirc():
+    return lirc.LircdConnection('dqremote', '/etc/lirc/lircrc.dqremote', '/var/run/lirc/lircd')
+
+
+def irsend(remote, button):
+    runcommand(['irsend', 'SEND_ONCE', remote, button, button, button, button, button])
+
+
+def runcommand(cmd, shell=False):
+    with open('/dev/null', 'w') as o:
+        return subprocess.call(cmd, stdout=o, stderr=o, shell=shell)
+
+
+def sethdmi(cecconn, hdmi):
+    # needed to direct audio at the receiver
+    # However, it seems to screw up HDMI switching to anything other that HDMI1, so only send it when we switch to that!
+    if hdmi == 0:
+        cecconn.Transmit(cecconn.CommandFromString("15:70:11:00"))  # system audio mode request 1.1.0.0
+
+    cecconn.Transmit(cecconn.CommandFromString("15:44:69:{:2X}".format(hdmi+1)))
+    cecconn.SendKeyRelease(cec.CECDEVICE_AUDIOSYSTEM)
+
+
+    cecconn.SetOSDString(cec.CECDEVICE_TV, 5, "HELLO")
+
+
+def sendkey(cecconn, device, key):
+    cecconn.SendKeypress(device, key)
+    cecconn.SendKeyRelease(device)
+
+
+def mainloop(cecconn, lircconn):
+    print("Starting main loop")
+
+    hdmi = 0
+    sethdmi(cecconn, hdmi)
+
+    releasepending = False
+    while True:
+        if releasepending: 
+            timeout = 0
+        else:
+            timeout = None
+        try:
+            cmd = lircconn.readline(timeout=timeout)
+        except lirc.client.TimeoutException:
+            cmd = None
+
+        if cmd == 'tvtoggle':
+            if cecconn.GetDevicePowerStatus(cec.CECDEVICE_AUDIOSYSTEM) == 0:
+                cmd = 'tvoff'
+            else:
+                cmd = 'tvon'
+
+        if cmd == 'volup':
+            if not releasepending:
+                cecconn.SendKeypress(cec.CECDEVICE_AUDIOSYSTEM, cec.CEC_USER_CONTROL_CODE_VOLUME_UP, False)
+            releasepending = True
+
+        elif cmd == 'voldown':
+            if not releasepending:
+                cecconn.SendKeypress(cec.CECDEVICE_AUDIOSYSTEM, cec.CEC_USER_CONTROL_CODE_VOLUME_DOWN, False)
+            releasepending = True
+
+        elif cmd == 'volmute':
+            sendkey(cecconn, cec.CECDEVICE_AUDIOSYSTEM, cec.CEC_USER_CONTROL_CODE_MUTE)
+
+        elif cmd == 'play':
+            sendkey(cecconn, cec.CECDEVICE_BROADCAST, cec.CEC_USER_CONTROL_CODE_PLAY)
+
+        elif cmd == 'pause':
+            sendkey(cecconn, cec.CECDEVICE_BROADCAST, cec.CEC_USER_CONTROL_CODE_PAUSE)
+
+        elif cmd == 'stop':
+            sendkey(cecconn, cec.CECDEVICE_BROADCAST, cec.CEC_USER_CONTROL_CODE_STOP)
+
+        elif cmd == 'tvon':
+            runcommand(['wol', '38:2c:4a:bd:c1:dd'])
+            cecconn.PowerOnDevices(cec.CECDEVICE_AUDIOSYSTEM)
+            hdmi = 0
+            sethdmi(cecconn, hdmi)
+            time.sleep(1)
+            irsend('Samsung', 'poweron')
+            irsend('Samsung', 'hdmi1')
+
+        elif cmd == 'tvoff':
+            runcommand(['ssh', '-oConnectTimeout=1', 'root@lys', 'poweroff'])
+            cecconn.StandbyDevices(cec.CECDEVICE_AUDIOSYSTEM)
+            time.sleep(1)
+            irsend('Samsung', 'poweroff')
+
+        elif cmd == 'input':
+            hdmi = (hdmi + 1) % 4
+            sethdmi(cecconn, hdmi)
+
+        elif cmd is None:
+            if releasepending:
+                cecconn.SendKeyRelease(cec.CECDEVICE_AUDIOSYSTEM)
+            releasepending = False
+
+        else:
+            print("Unknown command: %s" % cmd, file=sys.stderr)
+
+
+mainloop(initcec(), initlirc())
+

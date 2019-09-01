@@ -1,0 +1,10 @@
+[Unit]
+Description=DQ Remote
+
+[Service]
+User=dqremote
+Type=simple
+ExecStart=/usr/local/bin/dqremote
+
+[Install]
+WantedBy=multi-user.target
